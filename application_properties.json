@@ -3,13 +3,13 @@
     "PropertyGroupId": "kinesis.analytics.flink.run.options",
     "PropertyMap": {
       "python": "StreamingFileSink/streaming-file-sink.py",
-      "jarfile": "StreamingFileSink/lib/amazon-kinesis-sql-connector-flink-2.0.3.jar"
+      "jarfile": "StreamingFileSink/lib/flink-sql-connector-kinesis_2.12-1.13.2"
     }
   },
   {
     "PropertyGroupId": "consumer.config.0",
     "PropertyMap": {
-      "input.stream.name": "ExampleOutputStream",
+      "input.stream.name": "ExampleInputStream",
       "flink.stream.initpos": "LATEST",
       "aws.region": "us-west-2"
     }
@@ -19,4 +19,5 @@
     "PropertyMap": {
       "output.bucket.name": "flink-shimingr-output"
     }
-  }]
+  }
+]

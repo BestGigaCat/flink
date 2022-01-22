@@ -1,3 +1,5 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
 # -*- coding: utf-8 -*-
 
 """
@@ -8,12 +10,12 @@ This module:
     2. Creates a source table from a Kinesis Data Stream
     3. Creates a sink table writing to an S3 Bucket
     4. Queries from the Source Table and
-       creates a tumbling window over 1 minute to calculate the average PRICE over the window.
+       creates a tumbling window over 1 minute to calculate the average price over the window.
     5. These tumbling window results are inserted into the Sink table (S3)
 """
 
 from pyflink.table import EnvironmentSettings, StreamTableEnvironment
-from pyflink.table.window import Tumble
+from pyflink.table.window import Tumble, Slide
 import os
 import json
 
@@ -27,21 +29,20 @@ statement_set = table_env.create_statement_set()
 
 APPLICATION_PROPERTIES_FILE_PATH = "/etc/flink/application_properties.json"  # on kda
 
-is_local = True
-# (True if os.environ.get("IS_LOCAL") else False)  # set this env var in your local environment
+is_local = (True if os.environ.get("IS_LOCAL") else False)  # set this env var in your local environment
 
 if is_local:
-    # only for local, overwrite variable to properties and pass in your jars delimited by a semicolon (;)
-    APPLICATION_PROPERTIES_FILE_PATH = "application_properties.json"  # local
-
     CURRENT_DIR = os.path.dirname(os.path.realpath(__file__))
+    # only for local, overwrite variable to properties and pass in your jars delimited by a semicolon (;)
+    APPLICATION_PROPERTIES_FILE_PATH = CURRENT_DIR + "/application_properties.json"  # local
+
     table_env.get_config().get_configuration().set_string(
         "pipeline.jars",
         "file:///"
         + CURRENT_DIR
-        + "/lib/amazon-kinesis-sql-connector-flink-2.0.3.jar;file:///"
+        + "/lib/flink-sql-connector-kinesis_2.12-1.13.2.jar;file:///"
         + CURRENT_DIR
-        + "/plugins/flink-s3-fs-hadoop/flink-s3-fs-hadoop-1.11.2.jar",
+        + "/plugins/flink-s3-fs-hadoop/flink-s3-fs-hadoop-1.13.2.jar",
         )
 
     table_env.get_config().get_configuration().set_string(
@@ -70,13 +71,13 @@ def property_map(props, property_group_id):
 
 def create_source_table(table_name, stream_name, region, stream_initpos):
     return """ CREATE TABLE {0} (
-                TICKER VARCHAR(6),
-                PRICE DOUBLE,
-                EVENT_TIME TIMESTAMP(3),
-                WATERMARK FOR EVENT_TIME AS EVENT_TIME - INTERVAL '5' SECOND
+                ticker VARCHAR(6),
+                price DOUBLE,
+                event_time TIMESTAMP(3),
+                WATERMARK FOR event_time AS event_time - INTERVAL '5' SECOND
 
               )
-              PARTITIONED BY (TICKER)
+              PARTITIONED BY (ticker)
               WITH (
                 'connector' = 'kinesis',
                 'stream' = '{1}',
@@ -91,13 +92,12 @@ def create_source_table(table_name, stream_name, region, stream_initpos):
 
 def create_sink_table(table_name, bucket_name):
     return """ CREATE TABLE {0} (
-                TICKER VARCHAR(6),
-                PRICE DOUBLE,
-                EVENT_TIME TIMESTAMP(3),
-                WATERMARK FOR EVENT_TIME AS EVENT_TIME - INTERVAL '5' SECOND
-
+                ticker VARCHAR(6),
+                price DOUBLE,
+                event_time TIMESTAMP(3),
+                WATERMARK FOR event_time AS event_time - INTERVAL '5' SECOND
               )
-              PARTITIONED BY (TICKER)
+              PARTITIONED BY (ticker)
               WITH (
                   'connector'='filesystem',
                   'path'='s3a://{1}/',
@@ -108,16 +108,16 @@ def create_sink_table(table_name, bucket_name):
         table_name, bucket_name)
 
 
-def count_by_word(input_table_name):
+def perform_tumbling_window_aggregation(input_table_name):
     # use SQL Table in the Table API
     input_table = table_env.from_path(input_table_name)
 
     tumbling_window_table = (
         input_table.window(
-            Tumble.over("1.minute").on("EVENT_TIME").alias("one_minute_window")
+            Tumble.over("10.seconds").on("event_time").alias("ten_second_window")
         )
-            .group_by("TICKER, one_minute_window")
-            .select("TICKER, PRICE.avg as PRICE, one_minute_window.end as EVENT_TIME")
+            .group_by("ticker, ten_second_window")
+            .select("ticker, price.sum as price, ten_second_window.end as event_time")
     )
 
     return tumbling_window_table
@@ -163,14 +163,20 @@ def main():
     )
     table_env.execute_sql(create_sink)
 
-    # 4. Queries from the Source Table and creates a tumbling window over 1 minute to calculate the average PRICE
+    # 4. Queries from the Source Table and creates a tumbling window over 10 seconds to calculate the cumulative price
     # over the window.
-    tumbling_window_table = count_by_word(input_table_name)
+    tumbling_window_table = perform_tumbling_window_aggregation(input_table_name)
+    table_env.create_temporary_view("tumbling_window_table", tumbling_window_table)
 
-    # 5. These tumbling windows are inserted into the sink table (S3)
-    tumbling_window_table.execute_insert(output_table_name).wait()
+    # 5. These tumbling windows are inserted into the sink table
+    table_result = table_env.execute_sql("INSERT INTO {0} SELECT ticker, price, event_time FROM {1}"
+                                         .format(output_table_name, "tumbling_window_table"))
 
-    statement_set.execute()
+    if is_local:
+        table_result.wait()
+    else:
+        # get job status through TableResult
+        print(table_result.get_job_client().get_job_status())
 
 
 if __name__ == "__main__":
